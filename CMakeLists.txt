@@ -31,7 +31,15 @@ if (NOT DEFINED CMAKE_C_COMPILER)
 endif()
 
 project(Foundation
-    LANGUAGES C Swift)
+    LANGUAGES C)
+
+option(ENABLE_SWIFT "enable libdispatch swift overlay" ON)
+if(ENABLE_SWIFT)
+  enable_language(Swift)
+endif()
+
+option(BUILD_SHARED_LIBS "build shared libraries" ON)
+
 
 if(NOT SWIFT_SYSTEM_NAME)
   if(CMAKE_SYSTEM_NAME STREQUAL Darwin)
@@ -56,7 +64,6 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_Swift_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/swift)
 
-option(BUILD_SHARED_LIBS "build shared libraries" ON)
 
 # Optionally build tools (on by default) but only when building shared libraries
 if(BUILD_SHARED_LIBS)
@@ -65,6 +72,11 @@ endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE YES)
 
+include(CheckLinkerFlag)
+include(CheckFunctionExists)
+
+check_linker_flag(C "LINKER:--build-id=sha1" LINKER_SUPPORTS_BUILD_ID)
+    
 # Fetchable dependcies
 include(FetchContent)
 if (_SwiftFoundationICU_SourceDIR)
@@ -72,35 +84,35 @@ if (_SwiftFoundationICU_SourceDIR)
         SOURCE_DIR ${_SwiftFoundationICU_SourceDIR})
 else()
     FetchContent_Declare(SwiftFoundationICU
-        GIT_REPOSITORY https://github.com/apple/swift-foundation-icu.git
-        GIT_TAG 0.0.9)
-endif()
-
-if (_SwiftFoundation_SourceDIR)
-    FetchContent_Declare(SwiftFoundation
-        SOURCE_DIR ${_SwiftFoundation_SourceDIR})
-else()
-    FetchContent_Declare(SwiftFoundation
-        GIT_REPOSITORY https://github.com/apple/swift-foundation.git
+        GIT_REPOSITORY https://github.com/hmelder/swift-foundation-icu.git
         GIT_TAG main)
 endif()
-FetchContent_MakeAvailable(SwiftFoundationICU SwiftFoundation)
+FetchContent_MakeAvailable(SwiftFoundationICU)
 
-include(CheckLinkerFlag)
-
-check_linker_flag(C "LINKER:--build-id=sha1" LINKER_SUPPORTS_BUILD_ID)
-
-# Precompute module triple for installation
-if(NOT SwiftFoundation_MODULE_TRIPLE)
-    set(module_triple_command "${CMAKE_Swift_COMPILER}" -print-target-info)
-    if(CMAKE_Swift_COMPILER_TARGET)
-        list(APPEND module_triple_command -target ${CMAKE_Swift_COMPILER_TARGET})
+if(ENABLE_SWIFT)
+    if (_SwiftFoundation_SourceDIR)
+        FetchContent_Declare(SwiftFoundation
+            SOURCE_DIR ${_SwiftFoundation_SourceDIR})
+    else()
+        FetchContent_Declare(SwiftFoundation
+            GIT_REPOSITORY https://github.com/apple/swift-foundation.git
+            GIT_TAG main)
     endif()
-    execute_process(COMMAND ${module_triple_command} OUTPUT_VARIABLE target_info_json)
-    string(JSON module_triple GET "${target_info_json}" "target" "moduleTriple")
-    set(SwiftFoundation_MODULE_TRIPLE "${module_triple}" CACHE STRING "swift module triple used for installed swiftmodule and swiftinterface files")
-    mark_as_advanced(SwiftFoundation_MODULE_TRIPLE)
+    FetchContent_MakeAvailable(SwiftFoundation)
+
+    # Precompute module triple for installation
+    if(NOT SwiftFoundation_MODULE_TRIPLE)
+        set(module_triple_command "${CMAKE_Swift_COMPILER}" -print-target-info)
+        if(CMAKE_Swift_COMPILER_TARGET)
+            list(APPEND module_triple_command -target ${CMAKE_Swift_COMPILER_TARGET})
+        endif()
+        execute_process(COMMAND ${module_triple_command} OUTPUT_VARIABLE target_info_json)
+        string(JSON module_triple GET "${target_info_json}" "target" "moduleTriple")
+        set(SwiftFoundation_MODULE_TRIPLE "${module_triple}" CACHE STRING "swift module triple used for installed swiftmodule and swiftinterface files")
+        mark_as_advanced(SwiftFoundation_MODULE_TRIPLE)
+    endif()
 endif()
+
 
 # System dependencies
 
@@ -108,10 +120,12 @@ endif()
 if(NOT CMAKE_SYSTEM_NAME STREQUAL WASI)
     find_package(dispatch CONFIG)
     if(NOT dispatch_FOUND)
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
-            set(DEFAULT_DISPATCH_INCLUDE_PATH "/usr/lib/swift")
-        elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-            set(DEFAULT_DISPATCH_INCLUDE_PATH "$ENV{SDKROOT}usr/include")
+        if (NOT DEFINED DEFAULT_DISPATCH_INCLUDE_PATH)
+            if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+                set(DEFAULT_DISPATCH_INCLUDE_PATH "/usr/lib/swift")
+            elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+                set(DEFAULT_DISPATCH_INCLUDE_PATH "$ENV{SDKROOT}usr/include")
+            endif()
         endif()
         set(DISPATCH_INCLUDE_PATH "${DEFAULT_DISPATCH_INCLUDE_PATH}" CACHE STRING "A path to where you can find libdispatch headers")
         message("-- dispatch_DIR not found, using dispatch from SDK at ${DISPATCH_INCLUDE_PATH}")
@@ -122,6 +136,19 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL WASI)
 endif()
 find_package(LibXml2 REQUIRED)
 find_package(CURL REQUIRED)
+
+check_function_exists(strlcpy HAVE_STRLCPY)
+check_function_exists(strlcpy HAVE_STRLCAT)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+    check_function_exists(sched_getaffinity HAVE_SCHED_GETAFFINITY)
+endif()
+    
+list(APPEND _Foundation_common_build_flags
+        "-DHAVE_STRLCPY=${HAVE_STRLCPY}"
+        "-DHAVE_STRLCAT=${HAVE_STRLCAT}"
+        "-DHAVE_SCHED_GETAFFINITY=${HAVE_SCHED_GETAFFINITY}")
+
 
 # Common build flags (_CFURLSessionInterface, _CFXMLInterface, CoreFoundation)
 list(APPEND _Foundation_common_build_flags
@@ -194,7 +221,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
 endif()
 
 include(GNUInstallDirs)
-include(FoundationSwiftSupport)
+if(ENABLE_SWIFT)
+    include(FoundationSwiftSupport)
+endif()
 
-add_subdirectory(Sources)
+if(NOT ENABLE_SWIFT)
+    add_subdirectory(Sources/CoreFoundation)
+else()
+    add_subdirectory(Sources)
+endif()
+
 add_subdirectory(cmake/modules)
